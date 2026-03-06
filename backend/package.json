@@ -1,0 +1,18 @@
+{
+  "name": "blossom-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "build": "echo 'No build step required — Vercel handles TypeScript compilation'"
+  },
+  "dependencies": {
+    "hono": "^4.7.4",
+    "rss-parser": "^3.13.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest"
+  }
+}
