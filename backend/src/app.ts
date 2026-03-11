@@ -1,10 +1,10 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
-import newsRouter from './routes/news.ts'
-import marketsRouter from './routes/markets.ts'
-import weatherRouter from './routes/weather.ts'
-import intelRouter from './routes/intel.ts'
+import newsRouter from './routes/news.js'
+import marketsRouter from './routes/markets.js'
+import weatherRouter from './routes/weather.js'
+import intelRouter from './routes/intel.js'
 
 const app = new Hono().basePath('/api')
 
