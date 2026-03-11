@@ -29,6 +29,9 @@ app.use('*', logger())
 
 app.get('/', (c) => c.json({ name: 'blossom-api', version: '1.0.0', status: 'ok' }))
 
+// Health check endpoint for deployment verification
+app.get('/health', (c) => c.json({ status: 'healthy', timestamp: new Date().toISOString() }))
+
 app.route('/news', newsRouter)
 app.route('/markets', marketsRouter)
 app.route('/weather', weatherRouter)

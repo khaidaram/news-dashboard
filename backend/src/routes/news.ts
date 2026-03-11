@@ -10,12 +10,7 @@ const globalFeeds = [
     { name: 'BBC World', url: 'http://feeds.bbci.co.uk/news/world/rss.xml' },
     { name: 'AP News', url: 'https://rsshub.app/apnews/topics/apf-topnews' },
     { name: 'Al Jazeera', url: 'https://www.aljazeera.com/xml/rss/all.xml' },
-    { name: 'The Guardian', url: 'https://www.theguardian.com/world/rss' },
-    { name: 'Defense News', url: 'https://www.defensenews.com/arc/outboundfeeds/rss/' },
-    { name: 'Politico', url: 'https://rss.politico.com/politics-news.xml' },
-    { name: 'Foreign Policy', url: 'https://foreignpolicy.com/feed/' },
     { name: 'Bloomberg', url: 'https://www.bloomberg.com/feeds/sitemap_news.xml' },
-    { name: 'Yahoo Finance', url: 'https://finance.yahoo.com/news/rssindex' },
 ]
 
 export interface NewsItem {
@@ -32,29 +27,36 @@ async function fetchFeeds(
     sources: { name: string; url: string }[],
     isLocal: boolean
 ): Promise<NewsItem[]> {
-    const parser = new Parser({ timeout: 10000 })
+    const parser = new Parser({ timeout: 5000 }) // Reduced from 10s to 5s
     const cutoff = Date.now() - 24 * 60 * 60 * 1000 // 24h
 
+    // Limit concurrent feeds to 3 to reduce load
     const results = await Promise.allSettled(
         sources.map(async (src) => {
-            const feed = await parser.parseURL(src.url)
-            const items: NewsItem[] = []
-            for (const entry of feed.items ?? []) {
-                if (!entry.title) continue
-                const pub = new Date(entry.pubDate ?? entry.isoDate ?? Date.now())
-                if (pub.getTime() < cutoff) continue
-                const { level, category } = classifyThreat(entry.title)
-                items.push({
-                    title: entry.title,
-                    source: src.name,
-                    publishedAt: pub.toISOString(),
-                    url: entry.link ?? '',
-                    level,
-                    category,
-                    isLocal,
-                })
+            try {
+                const feed = await parser.parseURL(src.url)
+                const items: NewsItem[] = []
+                // Limit items per feed to 10
+                for (const entry of (feed.items ?? []).slice(0, 10)) {
+                    if (!entry.title) continue
+                    const pub = new Date(entry.pubDate ?? entry.isoDate ?? Date.now())
+                    if (pub.getTime() < cutoff) continue
+                    const { level, category } = classifyThreat(entry.title)
+                    items.push({
+                        title: entry.title,
+                        source: src.name,
+                        publishedAt: pub.toISOString(),
+                        url: entry.link ?? '',
+                        level,
+                        category,
+                        isLocal,
+                    })
+                }
+                return items
+            } catch (e) {
+                console.warn(`Failed to fetch ${src.name}:`, e)
+                return []
             }
-            return items
         })
     )
 
@@ -104,7 +106,6 @@ router.get('/local', async (c) => {
         { name: 'CNBC Market', url: 'https://www.cnbcindonesia.com/market/rss' },
         { name: 'Antara Ekonomi', url: 'https://www.antaranews.com/rss/ekonomi-bisnis' },
         { name: 'CNN Ekonomi', url: 'https://www.cnnindonesia.com/ekonomi/rss' },
-        { name: 'Google News Emiten', url: 'https://news.google.com/rss/search?q=IHSG+OR+Saham+OR+Emiten+OR+Dividen&hl=id&gl=ID&ceid=ID:id' },
     ]
 
     try {

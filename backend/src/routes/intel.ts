@@ -108,7 +108,7 @@ Scoring rules for SECTOR_RISKS:
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(45000), // Timeout aman untuk Free Tier
+            signal: AbortSignal.timeout(30000), // Reduced from 45s to 30s for Vercel safety margin
         })
 
         if (!res.ok) {
