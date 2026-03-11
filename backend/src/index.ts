@@ -1,4 +1,4 @@
-import app from './app'
+import app from './app.js'
 
 // Local dev entry point (Bun)
 const PORT = parseInt(process.env.PORT ?? '3001', 10)
