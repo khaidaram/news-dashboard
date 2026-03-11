@@ -1,5 +1,5 @@
 import { Hono } from 'hono'
-import { cacheGet, cacheSet, TTL } from '../services/cache.ts'
+import { cacheGet, cacheSet, TTL } from '../services/cache.js'
 
 const router = new Hono()
 

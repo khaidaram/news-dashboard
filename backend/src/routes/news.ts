@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import Parser from 'rss-parser'
-import { classifyThreat } from '../services/threatClassifier.ts'
-import { cacheGet, cacheSet, TTL } from '../services/cache.ts'
+import { classifyThreat } from '../services/threatClassifier.js'
+import { cacheGet, cacheSet, TTL } from '../services/cache.js'
 
 const router = new Hono()
 
