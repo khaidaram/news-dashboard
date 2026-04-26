@@ -31,3 +31,11 @@ Thumbs.db
 # IDEs
 .vscode/
 .idea/
+
+# Duplicate lock files (project uses bun.lock)
+backend/yarn.lock
+backend/package-lock.json
+frontend/yarn.lock
+
+# Runtime data / persisted cache
+backend/data/
