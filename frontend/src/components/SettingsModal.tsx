@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Settings as SettingsIcon, X, MapPin, RefreshCw } from 'lucide-react'
+import { Settings as SettingsIcon, X, MapPin, RefreshCw, Brain } from 'lucide-react'
 import type { Settings } from '../types.ts'
 
 interface Props {
@@ -97,8 +97,25 @@ export function SettingsModal({ settings, onSave, onClose }: Props) {
                             />
                         </div>
                     </div>
-                    <div className="form-hint" style={{ marginTop: 4 }}>
-                        AI Intel Brief uses <code style={{ fontFamily: 'var(--font-mono)', fontSize: 10 }}>OPENAI_API_KEY</code> from <code style={{ fontFamily: 'var(--font-mono)', fontSize: 10 }}>backend/.env</code>
+                    <div className="form-group" style={{ marginTop: 8 }}>
+                        <label className="form-label">
+                            <Brain size={10} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
+                            Intel Brief
+                        </label>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+                            <input
+                                type="checkbox"
+                                checked={form.enableIntelBrief}
+                                onChange={(e) => set('enableIntelBrief', e.target.checked)}
+                                style={{ accentColor: 'var(--bb-orange)', width: 14, height: 14 }}
+                            />
+                            <span style={{ fontSize: 10, color: form.enableIntelBrief ? 'var(--bb-orange)' : 'var(--bb-gray)' }}>
+                                {form.enableIntelBrief ? 'ENABLED — auto-generate saat load' : 'DISABLED — generate manual via tombol'}
+                            </span>
+                        </label>
+                        <div className="form-hint" style={{ marginTop: 4 }}>
+                            Menggunakan Claude Code CLI (tidak perlu API key).
+                        </div>
                     </div>
                 </div>
                 <div className="modal-footer">

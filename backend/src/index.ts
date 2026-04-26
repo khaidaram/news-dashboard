@@ -7,4 +7,5 @@ console.log(`🌸 Blossom API running on http://localhost:${PORT}`)
 export default {
     port: PORT,
     fetch: app.fetch,
+    idleTimeout: 0,  // disable timeout — screener + intel routes can take 60–120s (Claude CLI)
 }

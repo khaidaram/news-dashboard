@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import type { Settings } from '../types.ts'
 import { DEFAULT_SETTINGS } from '../types.ts'
 

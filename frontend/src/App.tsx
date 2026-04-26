@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import {
-  Globe, TrendingUp, MapPin, Brain,
+  Globe, TrendingUp, MapPin, Brain, Scan,
   AlertTriangle, RefreshCw, Settings as SettingsIcon,
   Wifi, WifiOff,
 } from 'lucide-react'
@@ -10,21 +10,23 @@ import { NewsPanel } from './components/NewsPanel.tsx'
 import { MarketsPanel } from './components/MarketsPanel.tsx'
 import { LocalPanel } from './components/LocalPanel.tsx'
 import { IntelPanel } from './components/IntelPanel.tsx'
+import { ScreenerPanel } from './components/ScreenerPanel.tsx'
 import { SettingsModal } from './components/SettingsModal.tsx'
 import './index.css'
 
-type TabId = 'news' | 'markets' | 'local' | 'intel'
+type TabId = 'news' | 'markets' | 'local' | 'intel' | 'screener'
 
 const TABS: Array<{ id: TabId; label: string; fkey: string; icon: React.ReactNode }> = [
   { id: 'news', label: 'GLOBAL NEWS', fkey: 'F1', icon: <Globe size={11} /> },
   { id: 'markets', label: 'MARKETS', fkey: 'F2', icon: <TrendingUp size={11} /> },
   { id: 'local', label: 'LOCAL', fkey: 'F3', icon: <MapPin size={11} /> },
   { id: 'intel', label: 'INTEL BRIEF', fkey: 'F4', icon: <Brain size={11} /> },
+  { id: 'screener', label: 'SMART MONEY', fkey: 'F6', icon: <Scan size={11} /> },
 ]
 
 export default function App() {
   const { settings, save } = useSettings()
-  const { state, fetchData, fetchIntel } = useDashboard(settings)
+  const { state, fetchData, fetchIntel, fetchScreener, fetchDeepDive } = useDashboard(settings)
   const [activeTab, setActiveTab] = useState<TabId>('news')
   const [showSettings, setShowSettings] = useState(false)
   const [now, setNow] = useState(() => new Date())
@@ -35,10 +37,17 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (state.globalNews.length > 0 && !state.intel && !state.loading.intel && !state.errors.intel) {
-      fetchIntel(state.globalNews)
+    if (
+      settings.enableIntelBrief &&
+      state.globalNews.length > 0 &&
+      state.localNews.length > 0 &&
+      !state.intel &&
+      !state.loading.intel &&
+      !state.errors.intel
+    ) {
+      fetchIntel(state.globalNews, state.localNews)
     }
-  }, [state.globalNews.length])
+  }, [state.globalNews.length, state.localNews.length, settings.enableIntelBrief]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -48,6 +57,7 @@ export default function App() {
       if (e.key === 'F3') { e.preventDefault(); setActiveTab('local') }
       if (e.key === 'F4') { e.preventDefault(); setActiveTab('intel') }
       if (e.key === 'F5') { e.preventDefault(); fetchData() }
+      if (e.key === 'F6') { e.preventDefault(); setActiveTab('screener') }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -58,9 +68,10 @@ export default function App() {
 
   const tabCount: Record<TabId, number | null> = {
     news: state.globalNews.length || null,
-    markets: state.markets ? (state.markets.crypto.length + state.markets.indices.length + state.markets.commodities.length) : null,
+    markets: state.markets ? (state.markets.indices.length + state.markets.commodities.length) : null,
     local: state.localNews.length || null,
-    intel: state.intel ? state.intel.countryRisks.length : null,
+    intel: state.intel ? state.intel.sectorRisks?.length : null,
+    screener: state.screener ? state.screener.watchlist.length : null,
   }
 
   const fmtTime = (d: Date) =>
@@ -123,7 +134,8 @@ export default function App() {
             (tab.id === 'news' && state.loading.globalNews) ||
             (tab.id === 'markets' && state.loading.markets) ||
             (tab.id === 'local' && (state.loading.localNews || state.loading.weather)) ||
-            (tab.id === 'intel' && state.loading.intel)
+            (tab.id === 'intel' && state.loading.intel) ||
+            (tab.id === 'screener' && state.loading.screener)
 
           return (
             <button
@@ -155,7 +167,7 @@ export default function App() {
             {state.markets.indices.slice(0, 3).map((idx) => (
               <span key={idx.symbol} className="tabbar-stat-item">
                 <span style={{ color: 'var(--bb-orange)', fontWeight: 700 }}>
-                  {idx.name.includes('S&P') ? 'SPX' : idx.name.includes('Dow') ? 'DJIA' : 'NDX'}
+                  {idx.symbol}
                 </span>
                 <span style={{ color: idx.changePct >= 0 ? 'var(--bb-up)' : 'var(--bb-down)' }}>
                   {idx.changePct >= 0 ? '▲' : '▼'}{Math.abs(idx.changePct).toFixed(2)}%
@@ -204,7 +216,23 @@ export default function App() {
               loading={state.loading.intel}
               error={state.errors.intel}
               globalNews={state.globalNews}
+              localNews={state.localNews}
               onFetchIntel={fetchIntel}
+              enabled={settings.enableIntelBrief}
+            />
+          </div>
+        )}
+        {activeTab === 'screener' && (
+          <div className="tab-pane">
+            <ScreenerPanel
+              screener={state.screener}
+              loading={state.loading.screener}
+              error={state.errors.screener}
+              onFetchScreener={fetchScreener}
+              deepdive={state.deepdive}
+              loadingDeepDive={state.loading.deepdive}
+              errorDeepDive={state.errors.deepdive}
+              onFetchDeepDive={fetchDeepDive}
             />
           </div>
         )}
