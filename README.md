@@ -11,7 +11,7 @@ A Bloomberg-style intelligence terminal for Indonesian equity traders. Aggregate
 | Tab | Key | Description |
 |-----|-----|-------------|
 | **Global News** | `F1` | RSS aggregation from Reuters, BBC, Al Jazeera, AP, Guardian, Defense News, Politico, Foreign Policy. Threat-classified (CRITICAL → INFO) and deduplicated. Includes IDX-specific local threat classifier. |
-| **Markets** | `F2` | Live crypto (CoinGecko), equity indices + commodities (Yahoo Finance), Polymarket prediction markets. |
+| **Markets** | `F2` | Global and domestic index, equity indices + commodities (Yahoo Finance) |
 | **Local** | `F3` | Weather conditions + 7-day forecast (Open-Meteo) + local news for any configured city. |
 | **Intel Brief** | `F4` | Claude-powered market pulse: top momentum stocks + sector risk signals derived from latest headlines. |
 | **Smart Money** | `F6` | IDX broker flow analysis in two stages: Screener → Deep Dive (see below). |
@@ -59,9 +59,7 @@ Output includes a **Copy Brief** button that copies a formatted `.md` report (to
 | AI | Claude claude-opus-4-7 (via Claude Code CLI) |
 | Broker Data | tradersaham.com broker intelligence API |
 | Weather | Open-Meteo (free, no key) |
-| Crypto | CoinGecko (free tier) |
 | Markets | Yahoo Finance chart API |
-| Predictions | Polymarket gamma API |
 
 ---
 
@@ -239,10 +237,7 @@ Redeploy the backend.
 |--------|------|--------------|
 | Reuters, BBC, AP, Al Jazeera, Guardian, Defense News, Politico, Foreign Policy | Global news RSS | No |
 | Google News RSS | Local news by city | No |
-| [tradersaham.com](https://tradersaham.com) | IDX broker intelligence & profiler | No (public API) |
-| [CoinGecko](https://coingecko.com) | Crypto prices | No |
 | [Yahoo Finance](https://finance.yahoo.com) | Indices + commodities | No |
-| [Polymarket](https://polymarket.com) | Prediction markets | No |
 | [Open-Meteo](https://open-meteo.com) | Weather | No |
 | [Claude Code CLI](https://claude.ai/code) | AI analysis (Screener, Deep Dive, Intel) | Auth required |
 
