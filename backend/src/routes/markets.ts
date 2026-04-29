@@ -6,7 +6,7 @@ const router = new Hono()
 // ── Yahoo Finance chart API ────────────────────────────────────────────────
 // Gunakan range=5d agar chartPreviousClose terisi benar & changePct akurat
 async function fetchYahooChart(symbol: string) {
-    const url = `https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d`
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`
     const res = await fetch(url, {
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',

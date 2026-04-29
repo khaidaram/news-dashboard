@@ -161,21 +161,37 @@ export default function App() {
 
         <div className="tabbar-spacer" />
 
-        {/* Live index tickers in tab bar */}
-        {state.markets && (
-          <div className="tabbar-status">
-            {state.markets.indices.slice(0, 3).map((idx) => (
-              <span key={idx.symbol} className="tabbar-stat-item">
-                <span style={{ color: 'var(--bb-orange)', fontWeight: 700 }}>
-                  {idx.symbol}
+        {/* Live IHSG + IDR in tab bar */}
+        {state.markets && (() => {
+          const ihsg = state.markets.indices.find(i => i.name === 'IHSG')
+          const idr  = state.markets.indices.find(i => i.name === 'USD/IDR')
+          return (
+            <div className="tabbar-status">
+              {ihsg && (
+                <span className="tabbar-stat-item">
+                  <span style={{ color: 'var(--bb-orange)', fontWeight: 700 }}>IHSG</span>
+                  <span style={{ color: 'var(--bb-white)', fontWeight: 600 }}>
+                    {Math.round(ihsg.price).toLocaleString('id-ID')}
+                  </span>
+                  <span style={{ color: ihsg.changePct >= 0 ? 'var(--bb-up)' : 'var(--bb-down)' }}>
+                    {ihsg.changePct >= 0 ? '▲' : '▼'}{Math.abs(ihsg.changePct).toFixed(2)}%
+                  </span>
                 </span>
-                <span style={{ color: idx.changePct >= 0 ? 'var(--bb-up)' : 'var(--bb-down)' }}>
-                  {idx.changePct >= 0 ? '▲' : '▼'}{Math.abs(idx.changePct).toFixed(2)}%
+              )}
+              {idr && (
+                <span className="tabbar-stat-item">
+                  <span style={{ color: 'var(--bb-orange)', fontWeight: 700 }}>IDR</span>
+                  <span style={{ color: 'var(--bb-white)', fontWeight: 600 }}>
+                    {Math.round(idr.price).toLocaleString('id-ID')}
+                  </span>
+                  <span style={{ color: idr.changePct >= 0 ? 'var(--bb-down)' : 'var(--bb-up)' }}>
+                    {idr.changePct >= 0 ? '▲' : '▼'}{Math.abs(idr.changePct).toFixed(2)}%
+                  </span>
                 </span>
-              </span>
-            ))}
-          </div>
-        )}
+              )}
+            </div>
+          )
+        })()}
 
         {state.lastUpdated && (
           <span className="tabbar-updated">

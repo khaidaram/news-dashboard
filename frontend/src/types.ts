@@ -187,6 +187,17 @@ export interface TopBrokerInfo {
     marketSharePct: number
     avgPrice: number
     acceleration: AccelerationLabel
+    buyAvg: number
+    sellAvg: number
+}
+
+export interface TrackedPosition {
+    code: string
+    name: string
+    side: 'BUY' | 'SELL'
+    netVal: number
+    buyAvg: number
+    sellAvg: number
 }
 
 export interface StockDeepDive {
@@ -206,7 +217,8 @@ export interface StockDeepDive {
         smartAccumulators: string[]
         netSellers: string[]
     }
-    topBrokers: TopBrokerInfo[]
+    topBuyers: TopBrokerInfo[]
+    topSellers: TopBrokerInfo[]
     totalNetValue: number
     foreignNetValue: number
     domesticNetValue: number
@@ -224,6 +236,12 @@ export interface StockDeepDive {
         recent5d: number
         trend: MultiTfTrend
     }
+    // From /summary — enriched buyer/seller data
+    totalAccumNetValue: number
+    totalDistNetValue: number
+    meanBuyAvg: number
+    meanSellAvg: number
+    trackedPositions: TrackedPosition[]
 }
 
 export interface DeepDiveScore {
@@ -243,6 +261,7 @@ export interface DeepDivePick {
     deepDive: StockDeepDive
     scoreBreakdown: DeepDiveScore
     claudeNarrative?: string
+    claudeCatalyst?: string
 }
 
 export interface DeepDiveResult {

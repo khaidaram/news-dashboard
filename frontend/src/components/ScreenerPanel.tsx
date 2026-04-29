@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Brain, RefreshCw, AlertTriangle, Scan, Crosshair, Loader } from 'lucide-react'
-import type { ScreenerResult, WatchlistItem, DeepDiveResult, DeepDivePick, AccelerationLabel } from '../types.ts'
+import type { ScreenerResult, WatchlistItem, DeepDiveResult, DeepDivePick, TrackedPosition } from '../types.ts'
+
+const TRACKED = new Set(['AK', 'BK', 'ZP', 'KZ', 'RX'])
 
 // ── Screener helpers ──────────────────────────────────────────────────────────
 
@@ -171,6 +173,131 @@ function StockCard({ item, index }: { item: WatchlistItem; index: number }) {
 
 // ── Deep Dive helpers ─────────────────────────────────────────────────────────
 
+interface TradePlanData {
+    entryZone: string
+    stopLoss: string
+    target1: string
+    target2: string
+    rr: string
+    holdBias: string
+    stopPct: string
+    t1Pct: string
+}
+
+function computeTradePlan(dd: import('../types.ts').StockDeepDive): TradePlanData | null {
+    const trackedBuyers = (dd.trackedPositions ?? []).filter(p => p.side === 'BUY')
+    let entry = 0
+    if (trackedBuyers.length > 0) {
+        const totalNet = trackedBuyers.reduce((s, p) => s + Math.abs(p.netVal), 0)
+        entry = totalNet > 0
+            ? trackedBuyers.reduce((s, p) => s + p.buyAvg * Math.abs(p.netVal), 0) / totalNet
+            : trackedBuyers[0].buyAvg
+    } else if (dd.meanBuyAvg > 0) {
+        entry = dd.meanBuyAvg
+    }
+    if (entry <= 0) return null
+
+    const sl = entry * 0.95
+    const t1Raw = dd.meanSellAvg > 0 && dd.meanSellAvg > entry ? dd.meanSellAvg : entry * 1.10
+    const t2Raw = t1Raw * 1.05
+
+    const risk = entry - sl
+    const reward = t1Raw - entry
+    const rr = risk > 0 ? `1:${(reward / risk).toFixed(1)}` : 'N/A'
+
+    const stopPct = `${((sl - entry) / entry * 100).toFixed(1)}%`
+    const t1Pct = `+${((t1Raw - entry) / entry * 100).toFixed(1)}%`
+
+    const trend = dd.multiTimeframe.trend
+    const holdBias = trend.includes('ACCELERATING_BUY') ? 'SWING 1–4W'
+        : trend.includes('STEADY_BUY') ? 'SWING 2–6W'
+        : trend.includes('DECELERATING_BUY') ? 'SHORT 1–2W'
+        : trend.includes('BUY') ? 'SWING 2–4W'
+        : 'CAUTIOUS'
+
+    return {
+        entryZone: Math.round(entry).toLocaleString('id-ID'),
+        stopLoss: Math.round(sl).toLocaleString('id-ID'),
+        target1: Math.round(t1Raw).toLocaleString('id-ID'),
+        target2: Math.round(t2Raw).toLocaleString('id-ID'),
+        rr,
+        holdBias,
+        stopPct,
+        t1Pct,
+    }
+}
+
+function AccumDistBar({ accum, dist, meanBuy, meanSell }: {
+    accum: number; dist: number; meanBuy: number; meanSell: number
+}) {
+    const total = accum + dist
+    if (total <= 0) return null
+    const accumPct = Math.round(accum / total * 100)
+    const distPct = 100 - accumPct
+    const imbalance = accum - dist
+    const imbalanceColor = imbalance > 0 ? 'var(--bb-up)' : imbalance < 0 ? 'var(--bb-down)' : 'var(--bb-gray)'
+
+    return (
+        <div style={{ marginTop: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3, fontSize: 7, letterSpacing: '0.08em' }}>
+                <span style={{ color: 'var(--bb-up)', fontWeight: 700 }}>ACCUM</span>
+                <span style={{ color: imbalanceColor, fontWeight: 700 }}>
+                    NET {imbalance >= 0 ? '+' : ''}{Math.round(imbalance / 1e9) !== 0 ? `${(imbalance / 1e9).toFixed(1)}B` : `${(imbalance / 1e6).toFixed(0)}M`}
+                </span>
+                <span style={{ color: 'var(--bb-down)', fontWeight: 700 }}>DIST</span>
+            </div>
+
+            {/* Split bar */}
+            <div style={{ display: 'flex', height: 8, width: '100%', overflow: 'hidden', border: '1px solid var(--bb-border2)' }}>
+                <div style={{
+                    width: `${accumPct}%`,
+                    background: 'var(--bb-up)',
+                    opacity: 0.75,
+                    transition: 'width 0.6s ease',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+                }}>
+                    {accumPct > 20 && (
+                        <span style={{ fontSize: 6, color: '#000', fontWeight: 700 }}>{accumPct}%</span>
+                    )}
+                </div>
+                <div style={{
+                    width: `${distPct}%`,
+                    background: 'var(--bb-down)',
+                    opacity: 0.75,
+                    transition: 'width 0.6s ease',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+                }}>
+                    {distPct > 20 && (
+                        <span style={{ fontSize: 6, color: '#000', fontWeight: 700 }}>{distPct}%</span>
+                    )}
+                </div>
+            </div>
+
+            {/* Value labels */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2, fontSize: 8 }}>
+                <span style={{ color: 'var(--bb-up)' }}>{fmtIDR(accum)}</span>
+                <span style={{ color: 'var(--bb-down)' }}>{fmtIDR(-dist)}</span>
+            </div>
+
+            {/* Mean price markers */}
+            {(meanBuy > 0 || meanSell > 0) && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 3, fontSize: 8 }}>
+                    {meanBuy > 0 && (
+                        <span style={{ color: 'var(--bb-gray)' }}>
+                            buy avg <span style={{ color: 'var(--bb-cyan)', fontWeight: 700 }}>{Math.round(meanBuy).toLocaleString('id-ID')}</span>
+                        </span>
+                    )}
+                    {meanSell > 0 && (
+                        <span style={{ color: 'var(--bb-gray)' }}>
+                            sell avg <span style={{ color: 'var(--bb-orange)', fontWeight: 700 }}>{Math.round(meanSell).toLocaleString('id-ID')}</span>
+                        </span>
+                    )}
+                </div>
+            )}
+        </div>
+    )
+}
+
 function fmtIDR(val: number): string {
     const abs = Math.abs(val)
     const sign = val < 0 ? '-' : '+'
@@ -180,14 +307,14 @@ function fmtIDR(val: number): string {
     return `${sign}${Math.round(abs)}`
 }
 
-function accelColor(accel: AccelerationLabel, netValFull: number): string {
-    const isBuyer = netValFull >= 0
-    if (accel === 'FRESH_ENTRY' || accel === 'ACCELERATING') return isBuyer ? 'var(--bb-up)' : 'var(--bb-down)'
-    if (accel === 'STEADY') return 'var(--bb-yellow)'
-    if (accel === 'DECELERATING') return isBuyer ? 'var(--bb-yellow)' : 'var(--bb-cyan)'
-    if (accel === 'REVERSING') return isBuyer ? 'var(--bb-down)' : 'var(--bb-up)'
-    return 'var(--bb-gray)'
-}
+// function accelColor(accel: AccelerationLabel, netValFull: number): string {
+//     const isBuyer = netValFull >= 0
+//     if (accel === 'FRESH_ENTRY' || accel === 'ACCELERATING') return isBuyer ? 'var(--bb-up)' : 'var(--bb-down)'
+//     if (accel === 'STEADY') return 'var(--bb-yellow)'
+//     if (accel === 'DECELERATING') return isBuyer ? 'var(--bb-yellow)' : 'var(--bb-cyan)'
+//     if (accel === 'REVERSING') return isBuyer ? 'var(--bb-down)' : 'var(--bb-up)'
+//     return 'var(--bb-gray)'
+// }
 
 function signalBadgeColor(signal: string): string {
     if (signal === 'BULLISH') return 'var(--bb-up)'
@@ -234,9 +361,45 @@ function rankHeaderBg(rank: number): string {
     return 'var(--bb-bg3)'
 }
 
-function DeepDivePickCard({ pick, index }: { pick: DeepDivePick; index: number }) {
+const BROKER_COL = '28px 32px 54px 52px 52px'
+
+function BrokerRow({ b }: { b: import('../types.ts').TopBrokerInfo }) {
+    return (
+        <div style={{ display: 'grid', gridTemplateColumns: BROKER_COL, gap: 4, padding: '1px 0', borderTop: '1px solid var(--bb-border)' }}>
+            <span style={{ fontSize: 9, fontWeight: 700, color: TRACKED.has(b.code) ? 'var(--bb-yellow)' : 'var(--bb-orange)' }}>{b.code}</span>
+            <span style={{ fontSize: 8, color: b.type === 'Foreign' ? 'var(--bb-cyan)' : 'var(--bb-gray2)' }}>
+                {b.type === 'Foreign' ? 'FOR' : 'DOM'}
+            </span>
+            <span style={{ fontSize: 9, color: b.netValFull >= 0 ? 'var(--bb-up)' : 'var(--bb-down)', fontWeight: 700 }}>
+                {fmtIDR(b.netValFull)}
+            </span>
+            <span style={{ fontSize: 9, color: 'var(--bb-up)' }}>
+                {b.buyAvg > 0 ? b.buyAvg.toLocaleString('id-ID') : '—'}
+            </span>
+            <span style={{ fontSize: 9, color: 'var(--bb-down)' }}>
+                {b.sellAvg > 0 ? b.sellAvg.toLocaleString('id-ID') : '—'}
+            </span>
+        </div>
+    )
+}
+
+function BrokerColHeader() {
+    return (
+        <div style={{ display: 'grid', gridTemplateColumns: BROKER_COL, gap: 4, marginBottom: 2 }}>
+            {['CODE', 'TYPE', 'NET', 'BUY AVG', 'SELL AVG'].map(h => (
+                <span key={h} style={{ fontSize: 7, color: 'var(--bb-gray)', letterSpacing: '0.08em' }}>{h}</span>
+            ))}
+        </div>
+    )
+}
+
+function DeepDivePickCard({ pick, index, currentPrice }: { pick: DeepDivePick; index: number; currentPrice?: string }) {
     const dd = pick.deepDive
     const sb = pick.scoreBreakdown
+    const tradePlan = computeTradePlan(dd)
+
+    const buyers = (dd.topBuyers ?? []).slice(0, 5)
+    const sellers = (dd.topSellers ?? []).slice(0, 5)
 
     return (
         <div style={{
@@ -247,7 +410,7 @@ function DeepDivePickCard({ pick, index }: { pick: DeepDivePick; index: number }
             {/* Pick header */}
             <div style={{
                 display: 'grid',
-                gridTemplateColumns: '24px 60px 1fr auto',
+                gridTemplateColumns: '24px auto 1fr auto',
                 alignItems: 'center',
                 gap: 8,
                 padding: '6px 10px',
@@ -257,9 +420,16 @@ function DeepDivePickCard({ pick, index }: { pick: DeepDivePick; index: number }
                 <span style={{ fontSize: 11, fontWeight: 700, color: rankBorderColor(pick.rank) }}>
                     #{pick.rank}
                 </span>
-                <span style={{ fontWeight: 700, fontSize: 14, color: 'var(--bb-orange)', letterSpacing: '0.05em' }}>
-                    {pick.stockCode}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                    <span style={{ fontWeight: 700, fontSize: 14, color: 'var(--bb-orange)', letterSpacing: '0.05em' }}>
+                        {pick.stockCode}
+                    </span>
+                    {currentPrice && (
+                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--bb-white)', letterSpacing: '0.02em' }}>
+                            {currentPrice}
+                        </span>
+                    )}
+                </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 9 }}>
                     <span style={{ color: 'var(--bb-gray)' }}>SmartScan: <span style={{ color: scoreColor(pick.smartScanScore), fontWeight: 700 }}>{pick.smartScanScore}</span></span>
                     <span style={{ color: 'var(--bb-border2)' }}>|</span>
@@ -288,16 +458,16 @@ function DeepDivePickCard({ pick, index }: { pick: DeepDivePick; index: number }
                 </div>
             </div>
 
-            {/* Body: score breakdown + top brokers */}
+            {/* Body: score breakdown | buyers/sellers */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0 }}>
-                {/* Score breakdown */}
+                {/* Left: Score breakdown + multi-TF + tracked positions */}
                 <div style={{ padding: '8px 10px', borderRight: '1px solid var(--bb-border)' }}>
                     <div style={{ fontSize: 8, color: 'var(--bb-orange)', letterSpacing: '0.1em', marginBottom: 6, fontWeight: 700 }}>
                         SCORE BREAKDOWN
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        <ScoreBar label="Foreign Conviction (35%)" value={sb.foreignConviction} />
-                        <ScoreBar label="Classification Health (25%)" value={sb.classificationHealth} />
+                        <ScoreBar label="Smart Money Conviction (35%)" value={sb.foreignConviction} />
+                        <ScoreBar label="Accumulation Quality (25%)" value={sb.classificationHealth} />
                         <ScoreBar label="Multi-Timeframe (25%)" value={sb.multiTimeframe} />
                         <ScoreBar label="Claude Signal (15%)" value={sb.claudeSignal} />
                     </div>
@@ -309,57 +479,130 @@ function DeepDivePickCard({ pick, index }: { pick: DeepDivePick; index: number }
                         <span>5d: <span style={{ color: dd.multiTimeframe.recent5d >= 0 ? 'var(--bb-up)' : 'var(--bb-down)' }}>{fmtIDR(dd.multiTimeframe.recent5d)}</span></span>
                     </div>
 
-                    {/* Foreign summary */}
-                    <div style={{ marginTop: 6, fontSize: 9, color: 'var(--bb-gray)' }}>
-                        <span>Foreign: <span style={{ color: dd.foreignNetValue >= 0 ? 'var(--bb-up)' : 'var(--bb-down)', fontWeight: 700 }}>{fmtIDR(dd.foreignNetValue)}</span></span>
-                        {dd.foreignBrokers.smartAccumulators.length > 0 && (
-                            <span style={{ marginLeft: 8 }}>
-                                <span style={{ color: 'var(--bb-up)' }}>SA: {dd.foreignBrokers.smartAccumulators.join(', ')}</span>
-                            </span>
-                        )}
-                        {dd.foreignBrokers.netSellers.length > 0 && (
-                            <span style={{ marginLeft: 8 }}>
-                                <span style={{ color: 'var(--bb-down)' }}>NS: {dd.foreignBrokers.netSellers.join(', ')}</span>
-                            </span>
-                        )}
-                    </div>
+                    {/* Tracked whale positions */}
+                    {dd.trackedPositions && dd.trackedPositions.length > 0 && (
+                        <div style={{ marginTop: 6, fontSize: 9, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            {dd.trackedPositions.filter((p: TrackedPosition) => p.side === 'BUY').length > 0 && (
+                                <div>
+                                    <span style={{ color: 'var(--bb-up)', fontWeight: 700 }}>BUY: </span>
+                                    {dd.trackedPositions.filter((p: TrackedPosition) => p.side === 'BUY').map((p: TrackedPosition) => (
+                                        <span key={p.code} style={{ marginRight: 6 }}>
+                                            <span style={{ color: 'var(--bb-yellow)', fontWeight: 700 }}>{p.code}</span>
+                                            <span style={{ color: 'var(--bb-gray2)' }}> @{p.buyAvg}</span>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                            {dd.trackedPositions.filter((p: TrackedPosition) => p.side === 'SELL').length > 0 && (
+                                <div>
+                                    <span style={{ color: 'var(--bb-down)', fontWeight: 700 }}>SELL: </span>
+                                    {dd.trackedPositions.filter((p: TrackedPosition) => p.side === 'SELL').map((p: TrackedPosition) => (
+                                        <span key={p.code} style={{ marginRight: 6 }}>
+                                            <span style={{ color: 'var(--bb-yellow)', fontWeight: 700 }}>{p.code}</span>
+                                            <span style={{ color: 'var(--bb-gray2)' }}> @{p.sellAvg}</span>
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Market-wide accum/dist bar */}
+                    {dd.totalAccumNetValue != null && (
+                        <AccumDistBar
+                            accum={dd.totalAccumNetValue}
+                            dist={dd.totalDistNetValue}
+                            meanBuy={dd.meanBuyAvg}
+                            meanSell={dd.meanSellAvg}
+                        />
+                    )}
                 </div>
 
-                {/* Top brokers table */}
-                <div style={{ padding: '8px 10px' }}>
-                    <div style={{ fontSize: 8, color: 'var(--bb-orange)', letterSpacing: '0.1em', marginBottom: 6, fontWeight: 700 }}>
-                        TOP BROKERS BY FLOW
+                {/* Right: Buyers + Sellers separated */}
+                <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 0 }}>
+                    {/* TOP BUYERS */}
+                    <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <span style={{ fontSize: 7, color: 'var(--bb-up)', letterSpacing: '0.1em', fontWeight: 700 }}>
+                                TOP BUYERS
+                            </span>
+                            <span style={{ fontSize: 7, color: 'var(--bb-gray)' }}>
+                                {buyers.length}/5
+                            </span>
+                        </div>
+                        <BrokerColHeader />
+                        {buyers.length > 0
+                            ? buyers.map(b => <BrokerRow key={`buy-${b.code}`} b={b} />)
+                            : <span style={{ fontSize: 8, color: 'var(--bb-gray)' }}>— no data</span>
+                        }
                     </div>
-                    {/* Header */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '28px 50px 54px 54px 80px', gap: 4, marginBottom: 3 }}>
-                        {['CODE', 'TYPE', 'NET', '5D', 'ACCEL / CLASS'].map(h => (
-                            <span key={h} style={{ fontSize: 7, color: 'var(--bb-gray)', letterSpacing: '0.08em' }}>{h}</span>
-                        ))}
+
+                    {/* TOP SELLERS */}
+                    <div style={{ marginTop: 8 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <span style={{ fontSize: 7, color: 'var(--bb-down)', letterSpacing: '0.1em', fontWeight: 700 }}>
+                                TOP SELLERS
+                            </span>
+                            <span style={{ fontSize: 7, color: 'var(--bb-gray)' }}>
+                                {sellers.length}/5
+                            </span>
+                        </div>
+                        <BrokerColHeader />
+                        {sellers.length > 0
+                            ? sellers.map(b => <BrokerRow key={`sell-${b.code}`} b={b} />)
+                            : <span style={{ fontSize: 8, color: 'var(--bb-gray)' }}>— no data</span>
+                        }
                     </div>
-                    {dd.topBrokers.slice(0, 5).map(b => (
-                        <div key={b.code} style={{ display: 'grid', gridTemplateColumns: '28px 50px 54px 54px 80px', gap: 4, padding: '1px 0', borderTop: '1px solid var(--bb-border)' }}>
-                            <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--bb-orange)' }}>{b.code}</span>
-                            <span style={{ fontSize: 8, color: b.type === 'Foreign' ? 'var(--bb-cyan)' : 'var(--bb-gray2)' }}>
-                                {b.type === 'Foreign' ? 'FOR' : 'DOM'}
-                            </span>
-                            <span style={{ fontSize: 9, color: b.netValFull >= 0 ? 'var(--bb-up)' : 'var(--bb-down)', fontWeight: 700 }}>
-                                {fmtIDR(b.netValFull)}
-                            </span>
-                            <span style={{ fontSize: 9, color: b.netVal5d >= 0 ? 'var(--bb-up)' : 'var(--bb-down)' }}>
-                                {fmtIDR(b.netVal5d)}
-                            </span>
-                            <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
-                                <span style={{ fontSize: 7, color: accelColor(b.acceleration, b.netValFull), fontWeight: 700 }}>
-                                    {b.acceleration.replace('_', ' ')}
-                                </span>
-                                <span style={{ fontSize: 7, color: 'var(--bb-gray)' }}>
-                                    {b.classification.replace('_', '').slice(0, 6).toUpperCase()}
-                                </span>
-                            </div>
+                </div>
+            </div>
+
+            {/* Trade Plan strip */}
+            {tradePlan && (
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(6, 1fr)',
+                    gap: 0,
+                    borderTop: '1px solid var(--bb-border)',
+                    background: 'var(--bb-bg3)',
+                }}>
+                    {[
+                        { label: 'ENTRY ZONE', value: tradePlan.entryZone, color: 'var(--bb-cyan)' },
+                        { label: 'STOP LOSS', value: `${tradePlan.stopLoss} (${tradePlan.stopPct})`, color: 'var(--bb-down)' },
+                        { label: 'TARGET 1', value: `${tradePlan.target1} (${tradePlan.t1Pct})`, color: 'var(--bb-up)' },
+                        { label: 'TARGET 2', value: tradePlan.target2, color: 'var(--bb-up)' },
+                        { label: 'R/R', value: tradePlan.rr, color: 'var(--bb-white)', bold: true },
+                        { label: 'HOLD BIAS', value: tradePlan.holdBias, color: 'var(--bb-yellow)' },
+                    ].map(({ label, value, color, bold }) => (
+                        <div key={label} style={{
+                            padding: '4px 8px',
+                            borderRight: '1px solid var(--bb-border)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 2,
+                        }}>
+                            <span style={{ fontSize: 7, color: 'var(--bb-gray)', letterSpacing: '0.08em' }}>{label}</span>
+                            <span style={{ fontSize: 9, color, fontWeight: bold ? 700 : undefined }}>{value}</span>
                         </div>
                     ))}
                 </div>
-            </div>
+            )}
+
+            {/* Catalyst */}
+            {pick.claudeCatalyst && (
+                <div style={{
+                    padding: '4px 10px',
+                    fontSize: 9,
+                    color: 'var(--bb-white)',
+                    borderTop: '1px solid var(--bb-border)',
+                    background: 'var(--bb-orange)0d',
+                    display: 'flex',
+                    gap: 8,
+                    alignItems: 'baseline',
+                }}>
+                    <span style={{ color: 'var(--bb-orange)', fontStyle: 'normal', fontSize: 8, fontWeight: 700, flexShrink: 0 }}>CATALYST</span>
+                    <span>{pick.claudeCatalyst}</span>
+                </div>
+            )}
 
             {/* Claude narrative */}
             {pick.claudeNarrative && (
@@ -398,7 +641,7 @@ function DeepDiveSection({ deepdive, loading, error, screener, onFetchDeepDive }
             }}>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 9, color: 'var(--bb-orange)', fontWeight: 700, letterSpacing: '0.1em' }}>
                     <Crosshair size={10} />
-                    DEEP DIVE RANKING — TOP {Math.min(screener.watchlist.length, 10)}
+                    DEEP DIVE RANKING — ALL {screener.watchlist.length}
                 </span>
                 <div style={{ display: 'flex', gap: 4 }}>
                     {deepdive?.markdownBrief && !loading && (
@@ -429,7 +672,7 @@ function DeepDiveSection({ deepdive, loading, error, screener, onFetchDeepDive }
             {loading && (
                 <div className="loading-state">
                     <div className="spinner" />
-                    FETCHING BROKER PROFILES... ({Math.min(screener.watchlist.length, 10)} stocks × 30d)
+                    FETCHING BROKER PROFILES... ({screener.watchlist.length} stocks × 30d)
                 </div>
             )}
 
@@ -447,22 +690,30 @@ function DeepDiveSection({ deepdive, loading, error, screener, onFetchDeepDive }
 
             {deepdive && !loading && (
                 <>
-                    {deepdive.allRanked.length > 0 && (
-                        <>
-                            <div className="intel-section-label">
-                                ALL RANKED — {deepdive.period.start} → {deepdive.period.end} | {deepdive.analyzed} ANALYZED
-                            </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                                {deepdive.allRanked.map((pick, i) => (
-                                    <DeepDivePickCard key={pick.stockCode} pick={pick} index={i} />
-                                ))}
-                            </div>
-                        </>
-                    )}
+                    {deepdive.allRanked.length > 0 && (() => {
+                        const priceMap = new Map(screener.watchlist.map(w => [w.ticker, w.priceAnalysis?.['Current Price']]))
+                        return (
+                            <>
+                                <div className="intel-section-label">
+                                    ALL RANKED — {deepdive.period.start} → {deepdive.period.end} | {deepdive.analyzed} ANALYZED
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                                    {deepdive.allRanked.map((pick, i) => (
+                                        <DeepDivePickCard
+                                            key={pick.stockCode}
+                                            pick={pick}
+                                            index={i}
+                                            currentPrice={priceMap.get(pick.stockCode)}
+                                        />
+                                    ))}
+                                </div>
+                            </>
+                        )
+                    })()}
 
                     <div className="intel-footer">
                         <span style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 9, color: 'var(--bb-gray)' }}>
-                            Score = SmartScan×40% + DeepDive×60% (4-dim: foreign conviction, classification, multi-TF, claude signal)
+                            Score = SmartScan×40% + DeepDive×60% (4-dim: smart money conviction, accum quality, multi-TF, claude signal)
                         </span>
                         <span style={{ fontSize: 9 }}>
                             {new Date(deepdive.generatedAt).toLocaleTimeString('en', { hour12: false })}

@@ -5,19 +5,48 @@ import { persistGet, persistSet } from '../services/persist.ts'
 
 const router = new Hono()
 const PROFILER_BASE = 'https://apiv2.tradersaham.com/api/market-insight/broker-profiler'
+const TRACKED_BROKERS = new Set(['AK', 'BK', 'ZP', 'KZ', 'RX'])
 const CONCURRENCY = 3
-const MAX_STOCKS = 10
 const MODEL_NAME = 'claude-opus-4-7'
 
-// ── Profiler API types ────────────────────────────────────────────────────────
+// ── Broker Profile Lookup ─────────────────────────────────────────────────────
 
-interface BrokerClassification {
-    code: string
-    name: string
-    classification: string
+interface BrokerProfile {
+    broker_code: string
+    broker_name: string
+    status: string
+    smart_money_weight: string
+    primary_clientele: string
+    behavioral_signal: string
+    notes_for_ai: string
 }
 
-interface BrokerDetail {
+const _profilesRaw: BrokerProfile[] = JSON.parse(
+    await Bun.file(`${import.meta.dir}/../../../docs/v2/broker-profile/broker_profiles_enriched.json`).text()
+)
+const BROKER_PROFILES = new Map(_profilesRaw.map(b => [b.broker_code, b]))
+
+// ── API Types ─────────────────────────────────────────────────────────────────
+
+interface SummaryBroker {
+    broker_code: string
+    broker_name: string
+    broker_type: 'Foreign' | 'Domestic'
+    buy_val: number
+    buy_avg: number
+    sell_val: number
+    sell_avg: number
+    net_val: number
+}
+
+interface SummaryResponse {
+    stock_code: string
+    buyers: SummaryBroker[]
+    sellers: SummaryBroker[]
+    meta: { buy_count: number; sell_count: number; total: number }
+}
+
+interface ProfilerBrokerDetail {
     broker_code: string
     broker_name: string
     broker_type: 'Foreign' | 'Domestic'
@@ -34,24 +63,27 @@ interface BrokerDetail {
 
 interface ProfilerResponse {
     stock_code: string
-    signal: {
+    signal?: {
         signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL'
         confidence: number
         summary: string
-        brokerBreakdown: {
-            foreign: BrokerClassification[]
-            domestic: BrokerClassification[]
+        brokerBreakdown?: {
+            foreign: Array<{ code: string; name: string; classification: string }>
+            domestic: Array<{ code: string; name: string; classification: string }>
         }
     }
-    brokers: BrokerDetail[]
-    brokers_overflow: BrokerDetail[]
-    meta: {
-        total_net_value: number
-        [key: string]: unknown
-    }
+    brokers: ProfilerBrokerDetail[]
+    brokers_overflow: ProfilerBrokerDetail[]
+    meta?: { total_net_value?: number }
 }
 
-// ── Output types (mirror frontend/src/types.ts) ───────────────────────────────
+interface CombinedData {
+    ticker: string
+    profile: ProfilerResponse | null
+    summary: SummaryResponse | null
+}
+
+// ── Output Types (mirror frontend/src/types.ts) ───────────────────────────────
 
 type AccelerationLabel = 'FRESH_ENTRY' | 'ACCELERATING' | 'STEADY' | 'DECELERATING' | 'REVERSING'
 type MultiTfTrend =
@@ -73,6 +105,17 @@ interface TopBrokerInfo {
     marketSharePct: number
     avgPrice: number
     acceleration: AccelerationLabel
+    buyAvg: number
+    sellAvg: number
+}
+
+interface TrackedPosition {
+    code: string
+    name: string
+    side: 'BUY' | 'SELL'
+    netVal: number
+    buyAvg: number
+    sellAvg: number
 }
 
 interface StockDeepDive {
@@ -92,7 +135,8 @@ interface StockDeepDive {
         smartAccumulators: string[]
         netSellers: string[]
     }
-    topBrokers: TopBrokerInfo[]
+    topBuyers: TopBrokerInfo[]
+    topSellers: TopBrokerInfo[]
     totalNetValue: number
     foreignNetValue: number
     domesticNetValue: number
@@ -110,12 +154,18 @@ interface StockDeepDive {
         recent5d: number
         trend: MultiTfTrend
     }
+    totalAccumNetValue: number
+    totalDistNetValue: number
+    meanBuyAvg: number
+    meanSellAvg: number
+    trackedPositions: TrackedPosition[]
 }
 
 interface ClaudeSignal {
     score: number
     signal: string
     reason: string
+    catalyst?: string
 }
 
 interface DeepDiveScore {
@@ -135,6 +185,7 @@ interface DeepDivePick {
     deepDive: StockDeepDive
     scoreBreakdown: DeepDiveScore
     claudeNarrative?: string
+    claudeCatalyst?: string
 }
 
 interface DeepDiveResult {
@@ -145,7 +196,7 @@ interface DeepDiveResult {
     markdownBrief?: string
 }
 
-// ── Date helpers ──────────────────────────────────────────────────────────────
+// ── Date Helpers ──────────────────────────────────────────────────────────────
 
 function getDateRange(): { startDate: string; endDate: string } {
     const end = new Date()
@@ -155,49 +206,65 @@ function getDateRange(): { startDate: string; endDate: string } {
     return { startDate: fmt(start), endDate: fmt(end) }
 }
 
-// ── Fetcher ───────────────────────────────────────────────────────────────────
+// ── Fetchers ──────────────────────────────────────────────────────────────────
 
-async function fetchProfile(ticker: string, startDate: string, endDate: string): Promise<ProfilerResponse> {
-    const url = `${PROFILER_BASE}?stock_code=${ticker}&start_date=${startDate}&end_date=${endDate}&board=R`
-
-    async function attempt(): Promise<ProfilerResponse> {
-        const res = await fetch(url, { signal: AbortSignal.timeout(10000) })
-        if (!res.ok) throw new Error(`HTTP ${res.status} for ${ticker}`)
-        return res.json() as Promise<ProfilerResponse>
+async function fetchWithRetry<T>(url: string, timeoutMs = 12000): Promise<T> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+            if (!res.ok) throw new Error(`HTTP ${res.status}`)
+            return await res.json() as T
+        } catch (e) {
+            if (attempt < 2) await new Promise(r => setTimeout(r, 500 * (attempt + 1)))
+            else throw e
+        }
     }
+    throw new Error('unreachable')
+}
 
-    try {
-        return await attempt()
-    } catch {
-        return await attempt()
+async function fetchCombined(ticker: string, startDate: string, endDate: string): Promise<CombinedData> {
+    const profileUrl = `${PROFILER_BASE}?stock_code=${ticker}&start_date=${startDate}&end_date=${endDate}&board=R`
+    const summaryUrl = `${PROFILER_BASE}/summary?stock_code=${ticker}&metric=net&start_date=${startDate}&end_date=${endDate}&board=R`
+
+    const [profileResult, summaryResult] = await Promise.allSettled([
+        fetchWithRetry<ProfilerResponse>(profileUrl),
+        fetchWithRetry<SummaryResponse>(summaryUrl),
+    ])
+
+    return {
+        ticker,
+        profile: profileResult.status === 'fulfilled' ? profileResult.value : null,
+        summary: summaryResult.status === 'fulfilled' ? summaryResult.value : null,
     }
 }
 
-async function fetchAllProfiles(
+async function fetchAllCombined(
     tickers: string[],
     startDate: string,
     endDate: string,
-): Promise<Map<string, ProfilerResponse>> {
-    const results = new Map<string, ProfilerResponse>()
+): Promise<Map<string, CombinedData>> {
+    const results = new Map<string, CombinedData>()
 
     for (let i = 0; i < tickers.length; i += CONCURRENCY) {
         const batch = tickers.slice(i, i + CONCURRENCY)
         const settled = await Promise.allSettled(
-            batch.map(t => fetchProfile(t, startDate, endDate))
+            batch.map(t => fetchCombined(t, startDate, endDate))
         )
         settled.forEach((result, idx) => {
             if (result.status === 'fulfilled') {
                 results.set(batch[idx], result.value)
             } else {
                 console.error(`[deepdive] failed ${batch[idx]}:`, result.reason)
+                results.set(batch[idx], { ticker: batch[idx], profile: null, summary: null })
             }
         })
+        if (i + CONCURRENCY < tickers.length) await new Promise(r => setTimeout(r, 250))
     }
 
     return results
 }
 
-// ── Extractor ─────────────────────────────────────────────────────────────────
+// ── Analysis Helpers ──────────────────────────────────────────────────────────
 
 function computeAcceleration(netValFull: number, netVal5d: number): AccelerationLabel {
     if (netValFull === 0) return 'STEADY'
@@ -224,10 +291,77 @@ function computeMultiTfTrend(full: number, recent10d: number, recent5d: number):
     }
 }
 
-function extractMetrics(response: ProfilerResponse): StockDeepDive {
-    const foreignBd = response.signal?.brokerBreakdown?.foreign ?? []
-    const domesticBd = response.signal?.brokerBreakdown?.domestic ?? []
+// ── Extractor ─────────────────────────────────────────────────────────────────
 
+function extractMetrics(combined: CombinedData): StockDeepDive {
+    const { ticker, profile, summary } = combined
+
+    // ── /summary → positions, accum/dist, foreign/domestic split, top brokers ──
+    const buyers = summary?.buyers ?? []
+    const sellers = summary?.sellers ?? []
+    const allSummary = [...buyers, ...sellers]
+
+    // Market-wide accumulation and distribution
+    const totalAccumNetValue = buyers.reduce((s, b) => s + b.net_val, 0)
+    const totalDistNetValue = Math.abs(sellers.reduce((s, b) => s + b.net_val, 0))
+
+    // Volume-weighted mean prices from summary
+    const totalBuyVal = buyers.reduce((s, b) => s + b.buy_val, 0)
+    const meanBuyAvg = totalBuyVal > 0
+        ? buyers.reduce((s, b) => s + b.buy_avg * b.buy_val, 0) / totalBuyVal
+        : 0
+    const totalSellVal = sellers.reduce((s, b) => s + b.sell_val, 0)
+    const meanSellAvg = totalSellVal > 0
+        ? sellers.reduce((s, b) => s + b.sell_avg * b.sell_val, 0) / totalSellVal
+        : 0
+
+    // Foreign / domestic net from summary (authoritative for the scan period)
+    const foreignNetValue = allSummary
+        .filter(b => b.broker_type === 'Foreign')
+        .reduce((s, b) => s + b.net_val, 0)
+    const domesticNetValue = allSummary
+        .filter(b => b.broker_type === 'Domestic')
+        .reduce((s, b) => s + b.net_val, 0)
+    const totalNetValue = foreignNetValue + domesticNetValue
+
+    // Tracked whale positions (AK/BK/ZP/KZ/RX) from summary
+    const trackedPositions: TrackedPosition[] = []
+    for (const b of buyers) {
+        if (TRACKED_BROKERS.has(b.broker_code)) {
+            trackedPositions.push({ code: b.broker_code, name: b.broker_name, side: 'BUY', netVal: b.net_val, buyAvg: b.buy_avg, sellAvg: b.sell_avg })
+        }
+    }
+    for (const b of sellers) {
+        if (TRACKED_BROKERS.has(b.broker_code)) {
+            trackedPositions.push({ code: b.broker_code, name: b.broker_name, side: 'SELL', netVal: Math.abs(b.net_val), buyAvg: b.buy_avg, sellAvg: b.sell_avg })
+        }
+    }
+
+    // ── /profiler → inventory tracking: multi-TF flow, acceleration, classification
+    const allBrokers: ProfilerBrokerDetail[] = [
+        ...(profile?.brokers ?? []),
+        ...(profile?.brokers_overflow ?? []),
+    ]
+
+    // Profiler lookup keyed by broker_code — used only to enrich movement data
+    const profilerMap = new Map<string, ProfilerBrokerDetail>()
+    for (const b of allBrokers) profilerMap.set(b.broker_code, b)
+
+    // Classification counts from profiler (SMART_ACCUMULATOR / TRAPPED_BUYER / etc.)
+    const classificationCounts = { SMART_ACCUMULATOR: 0, TRAPPED_BUYER: 0, PROFIT_TAKER: 0, NET_SELLER: 0, MIXED_RETAIL: 0 }
+    for (const b of profile?.brokers ?? []) {
+        const k = b.classification as keyof typeof classificationCounts
+        if (k in classificationCounts) classificationCounts[k]++
+    }
+
+    // Multi-timeframe inventory flow from profiler
+    const full = allBrokers.reduce((s, b) => s + b.net_val_full, 0)
+    const recent10d = allBrokers.reduce((s, b) => s + b.net_10d_val, 0)
+    const recent5d = allBrokers.reduce((s, b) => s + b.net_5d_val, 0)
+
+    // Foreign/domestic breakdown classifications from profiler signal
+    const foreignBd = profile?.signal?.brokerBreakdown?.foreign ?? []
+    const domesticBd = profile?.signal?.brokerBreakdown?.domestic ?? []
     const foreignBrokers = {
         total: foreignBd.length,
         smartAccumulators: foreignBd.filter(b => b.classification === 'SMART_ACCUMULATOR').map(b => b.code),
@@ -235,61 +369,59 @@ function extractMetrics(response: ProfilerResponse): StockDeepDive {
         netSellers: foreignBd.filter(b => b.classification === 'NET_SELLER').map(b => b.code),
         profitTakers: foreignBd.filter(b => b.classification === 'PROFIT_TAKER').map(b => b.code),
     }
-
     const domesticBrokers = {
         total: domesticBd.length,
         smartAccumulators: domesticBd.filter(b => b.classification === 'SMART_ACCUMULATOR').map(b => b.code),
         netSellers: domesticBd.filter(b => b.classification === 'NET_SELLER').map(b => b.code),
     }
 
-    const topBrokers: TopBrokerInfo[] = [...(response.brokers ?? [])]
-        .sort((a, b) => Math.abs(b.net_val_full) - Math.abs(a.net_val_full))
-        .slice(0, 5)
-        .map(b => ({
+    // ── Merge: map summary brokers, enrich with profiler movement data ──────────
+    const mapBroker = (b: SummaryBroker): TopBrokerInfo => {
+        const p = profilerMap.get(b.broker_code)
+        const net5d = p?.net_5d_val ?? 0
+        return {
             code: b.broker_code,
             name: b.broker_name,
             type: b.broker_type,
-            netValFull: b.net_val_full,
-            netVal5d: b.net_5d_val,
-            netVal10d: b.net_10d_val,
-            classification: b.classification,
-            score: b.score,
-            buyDays: b.buy_days,
-            tradingDays: b.trading_days,
-            marketSharePct: b.market_share_pct,
-            avgPrice: b.avg_price,
-            acceleration: computeAcceleration(b.net_val_full, b.net_5d_val),
-        }))
-
-    const allBrokers = [...(response.brokers ?? []), ...(response.brokers_overflow ?? [])]
-    const foreignNetValue = allBrokers
-        .filter(b => b.broker_type === 'Foreign')
-        .reduce((s, b) => s + (b.net_val_full ?? 0), 0)
-    const domesticNetValue = allBrokers
-        .filter(b => b.broker_type === 'Domestic')
-        .reduce((s, b) => s + (b.net_val_full ?? 0), 0)
-    const totalNetValue = response.meta?.total_net_value ?? (foreignNetValue + domesticNetValue)
-
-    const classificationCounts = {
-        SMART_ACCUMULATOR: 0, TRAPPED_BUYER: 0, PROFIT_TAKER: 0, NET_SELLER: 0, MIXED_RETAIL: 0,
-    }
-    for (const b of response.brokers ?? []) {
-        const k = b.classification as keyof typeof classificationCounts
-        if (k in classificationCounts) classificationCounts[k]++
+            netValFull: b.net_val,             // summary is authoritative for position side
+            netVal5d: net5d,                   // profiler: short-term inventory flow
+            netVal10d: p?.net_10d_val ?? 0,    // profiler: medium-term inventory flow
+            classification: p?.classification ?? (b.net_val > 0 ? 'NET_BUYER' : 'NET_SELLER'),
+            score: p?.score ?? 0,
+            buyDays: p?.buy_days ?? 0,
+            tradingDays: p?.trading_days ?? 0,
+            marketSharePct: p?.market_share_pct ?? 0,
+            avgPrice: b.buy_avg,
+            acceleration: computeAcceleration(b.net_val, net5d),
+            buyAvg: b.buy_avg,
+            sellAvg: b.sell_avg,
+        }
     }
 
-    const full = allBrokers.reduce((s, b) => s + (b.net_val_full ?? 0), 0)
-    const recent10d = allBrokers.reduce((s, b) => s + (b.net_10d_val ?? 0), 0)
-    const recent5d = allBrokers.reduce((s, b) => s + (b.net_5d_val ?? 0), 0)
+    // Separate buyer and seller lists from /summary — all entries, frontend slices to 5 each
+    const topBuyers: TopBrokerInfo[] = buyers.map(mapBroker)
+    const topSellers: TopBrokerInfo[] = sellers.map(mapBroker)
+
+    // ── Signal derivation ────────────────────────────────────────────────────────
+    const netImbalance = totalAccumNetValue - totalDistNetValue
+    const trackedBuyers = trackedPositions.filter(p => p.side === 'BUY')
+    const apiSignal: 'BULLISH' | 'BEARISH' | 'NEUTRAL' =
+        profile?.signal?.signal ??
+        (trackedBuyers.length >= 2 && netImbalance > 0 ? 'BULLISH'
+            : netImbalance < 0 ? 'BEARISH' : 'NEUTRAL')
+    const apiConfidence = profile?.signal?.confidence ?? Math.round(Math.min(
+        Math.abs(netImbalance) / (totalAccumNetValue + totalDistNetValue + 1) * 100, 95
+    ))
 
     return {
-        stockCode: response.stock_code,
-        apiSignal: response.signal?.signal ?? 'NEUTRAL',
-        apiConfidence: response.signal?.confidence ?? 0,
-        apiSummary: response.signal?.summary ?? '',
+        stockCode: ticker,
+        apiSignal,
+        apiConfidence,
+        apiSummary: profile?.signal?.summary ?? '',
         foreignBrokers,
         domesticBrokers,
-        topBrokers,
+        topBuyers,
+        topSellers,
         totalNetValue,
         foreignNetValue,
         domesticNetValue,
@@ -301,6 +433,11 @@ function extractMetrics(response: ProfilerResponse): StockDeepDive {
             recent5d,
             trend: computeMultiTfTrend(full, recent10d, recent5d),
         },
+        totalAccumNetValue,
+        totalDistNetValue,
+        meanBuyAvg,
+        meanSellAvg,
+        trackedPositions,
     }
 }
 
@@ -308,65 +445,147 @@ function extractMetrics(response: ProfilerResponse): StockDeepDive {
 
 function fmtB(val: number): string {
     const abs = Math.abs(val)
-    if (abs >= 1e9) return `${(val / 1e9).toFixed(1)}B`
-    if (abs >= 1e6) return `${(val / 1e6).toFixed(1)}M`
-    return `${(val / 1e3).toFixed(0)}K`
+    const sign = val < 0 ? '-' : '+'
+    if (abs >= 1e9) return `${sign}${(abs / 1e9).toFixed(1)}B`
+    if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(0)}M`
+    return `${sign}${(abs / 1e3).toFixed(0)}K`
 }
 
-function buildDeepDivePrompt(metrics: StockDeepDive[]): string {
+function formatBrokerLine(b: SummaryBroker, profilerClass?: string): string {
+    const p = BROKER_PROFILES.get(b.broker_code)
+    const weight = p ? p.smart_money_weight.replace('VERY HIGH (TIER 1)', 'TIER1').replace('Very High (TIER 1-2)', 'TIER1-2').replace('Very High', 'VH').replace('High', 'H').replace('Medium-High', 'MH').replace('Medium', 'M').replace(/Low.*/, 'L') : '?'
+    const status = p?.status ?? '?'
+    const signal = p ? p.behavioral_signal.slice(0, 90) : ''
+    const cls = profilerClass ? ` [${profilerClass.replace('_', '')}]` : ''
+    return `  ${b.broker_code} | ${b.broker_type} | ${weight}/${status} | net=${fmtB(b.net_val)} buy_avg=${b.buy_avg} sell_avg=${b.sell_avg}${cls} → ${signal}`
+}
+
+function buildDeepDivePrompt(
+    metrics: StockDeepDive[],
+    combinedMap: Map<string, CombinedData>,
+): string {
     const stocksBlock = metrics.map(m => {
-        const fb = m.foreignBrokers
-        const db = m.domesticBrokers
+        const combined = combinedMap.get(m.stockCode)
+        const buyers = combined?.summary?.buyers ?? []
+        const sellers = combined?.summary?.sellers ?? []
+        const allProfilerBrokers = [
+            ...(combined?.profile?.brokers ?? []),
+            ...(combined?.profile?.brokers_overflow ?? []),
+        ]
+        const classMap = new Map(allProfilerBrokers.map(b => [b.broker_code, b.classification]))
+
         const tf = m.multiTimeframe
         const cc = m.classificationCounts
-        const topForeign = m.topBrokers.filter(b => b.type === 'Foreign').slice(0, 3)
-            .map(b => `${b.code}(${b.classification.replace('_', '').slice(0, 4)},${b.acceleration.replace('_', '')})`).join(', ')
+
+        const buyerLines = buyers.slice(0, 5)
+            .map(b => formatBrokerLine(b, classMap.get(b.broker_code)))
+            .join('\n')
+        const sellerLines = sellers.slice(0, 5)
+            .map(b => formatBrokerLine(b, classMap.get(b.broker_code)))
+            .join('\n')
+
+        const trackedBuyers = m.trackedPositions.filter(p => p.side === 'BUY')
+        const trackedSellers = m.trackedPositions.filter(p => p.side === 'SELL')
+        const trackedSummary = [
+            trackedBuyers.length > 0
+                ? `Buying: ${trackedBuyers.map(p => `${p.code}(net=${fmtB(p.netVal)},buy_avg=${p.buyAvg})`).join(', ')}`
+                : null,
+            trackedSellers.length > 0
+                ? `Selling: ${trackedSellers.map(p => `${p.code}(net=${fmtB(p.netVal)},sell_avg=${p.sellAvg})`).join(', ')}`
+                : null,
+        ].filter(Boolean).join(' | ') || 'none in top-30'
 
         return [
             `STOCK: ${m.stockCode}`,
-            `Foreign brokers: ${fb.total} total | SA: ${fb.smartAccumulators.join(',') || 'none'} | TB: ${fb.trappedBuyers.join(',') || 'none'} | NS: ${fb.netSellers.join(',') || 'none'} | PT: ${fb.profitTakers.join(',') || 'none'}`,
-            `Domestic brokers: ${db.total} total | SA: ${db.smartAccumulators.join(',') || 'none'} | NS: ${db.netSellers.join(',') || 'none'}`,
-            `Classification counts: SA=${cc.SMART_ACCUMULATOR} TB=${cc.TRAPPED_BUYER} PT=${cc.PROFIT_TAKER} NS=${cc.NET_SELLER} MR=${cc.MIXED_RETAIL}`,
-            `Net values: total=${fmtB(m.totalNetValue)} foreign=${fmtB(m.foreignNetValue)} domestic=${fmtB(m.domesticNetValue)}`,
-            `Multi-timeframe: full=${fmtB(tf.full)} 10d=${fmtB(tf.recent10d)} 5d=${fmtB(tf.recent5d)} trend=${tf.trend}`,
-            `Top foreign brokers: ${topForeign || 'none'}`,
+            `Market pressure: accum=${fmtB(m.totalAccumNetValue)} | dist=${fmtB(m.totalDistNetValue)} | net=${fmtB(m.totalAccumNetValue - m.totalDistNetValue)}`,
+            `Mean prices: buy_avg=${Math.round(m.meanBuyAvg)} | sell_avg=${Math.round(m.meanSellAvg)}`,
+            `Foreign net: ${fmtB(m.foreignNetValue)} | Domestic net: ${fmtB(m.domesticNetValue)}`,
+            `Broker classifications: SA=${cc.SMART_ACCUMULATOR} TB=${cc.TRAPPED_BUYER} NS=${cc.NET_SELLER} PT=${cc.PROFIT_TAKER}`,
+            `Multi-TF: full=${fmtB(tf.full)} 10d=${fmtB(tf.recent10d)} 5d=${fmtB(tf.recent5d)} trend=${tf.trend}`,
+            `Tracked SM brokers (AK/BK/ZP/KZ/RX): ${trackedSummary}`,
+            ``,
+            `TOP BUYERS (CODE | type | weight/status | net buy_avg sell_avg [class] → behavioral signal):`,
+            buyerLines || '  (none)',
+            ``,
+            `TOP SELLERS:`,
+            sellerLines || '  (none)',
         ].join('\n')
-    }).join('\n\n')
+    }).join('\n\n---\n\n')
 
-    return `You are a quantitative broker flow analyst for Indonesian equities (IDX).
+    return `You are an expert broker flow analyst for Indonesian equities (IDX).
 
-Analyze the broker profiler data below for each stock and assign a conviction score (0–100) plus a brief reason.
+Analyze broker flow data for each stock to determine the market structure, dominant player type, and investment thesis.
 
-Scoring guide:
-- Score 80–100: Strong institutional accumulation — multiple foreign smart accumulators, accelerating multi-timeframe flow, low net sellers
-- Score 60–79: Moderate conviction — some smart accumulation but mixed signals or decelerating
-- Score 40–59: Neutral — balanced buying/selling or insufficient data
-- Score 20–39: Weak — net sellers dominating or distribution pattern
-- Score 0–19: Bearish — strong sell classification or reversing flow
+## Broker weight legend (smart_money_weight):
+- TIER1 / VH = Tier-1 global/ASEAN institutional (AK=UBS, BK=JPMorgan, RX=Macquarie, ZP=Maybank, GW=HSBC, DP=DBS, YU=CGS, KZ=CLSA) — highest signal quality
+- H = High (CC=Mandiri, DX=Bahana, LG=Trimegah, SQ=BCA, HP=Henan) — strong domestic institutional
+- MH = Medium-High (YP=Mirae, NI=BNI, AI=UOB) — mixed institutional-retail
+- M = Medium — moderate informed, tier-2 institutions
+- L = Low (XL=Stockbit, XC=Ajaib, YP apps) — retail proxy, often CONTRA-SIGNAL when parabolic
 
-Key factors (in order of importance):
-1. Foreign smart accumulator count and quality (most important)
-2. Multi-timeframe trend and acceleration (fresh entry vs decelerating)
-3. Classification distribution ratio (SA+TB vs NS+PT)
-4. Foreign vs domestic dominance (foreign > domestic = stronger signal)
-5. Concentration risk (fewer brokers = more volatile)
+## Broker status legend:
+- Whale = Tier-1 smart money (AK, BK, RX, ZP)
+- Bandar = Local institutional/informed
+- Retail/Bandar = Mix
+- Retail = Pure retail proxy
 
-DO NOT reference or use any pre-computed API signal — derive your own assessment purely from the raw broker data above.
+## Key analysis rules:
+1. FOREIGN TIER1 convergence (≥2 of AK/BK/RX/ZP/GW/DP/YU/KZ buying together) = strongest signal
+2. Retail FOMO warning: XL/XC net buying large while TIER1 distributing = distribution trap
+3. Group-affiliation bias: DH (Sinarmas) buying DSSA/SMRA, CC (Mandiri) buying BMRI, NI buying BBNI = downweight (internal flow, not external signal)
+4. Price efficiency: buyers buying BELOW mean_buy_avg = smart accumulation; above = chasing
+5. Distribution pattern: TIER1 in sellers + retail in buyers = classic distribution setup
+
+## Scoring (0–100):
+- 80–100: Strong — TIER1 foreign convergence, large net surplus, SMART_ACCUMULATOR dominated, accelerating TF
+- 60–79: Moderate — some TIER1 buyers or strong domestic institutional, moderate surplus
+- 40–59: Neutral — mixed, no clear dominant, or fragmented flow
+- 20–39: Weak — sellers dominant, retail churn, or TIER1 distributing
+- 0–19: Avoid — institutional distribution, TIER1 all selling, classic retail trap
+
+## Dominant player categories:
+- FOREIGN_TIER1: ≥2 Tier-1 foreign brokers leading accumulation
+- LOCAL_INSTITUTION: domestic H/VH brokers (CC, DX, LG, SQ, HP) leading
+- MIXED_INSTITUTION: foreign + domestic institutions buying together
+- RETAIL_FOMO: XL/XC/YP leading buyers (retail-driven, low quality signal)
+- DISTRIBUTION: Net sellers dominant, institutions exiting into retail demand
+- MIXED: no clear dominant group
+
+## Thesis categories:
+- FRESH_ACCUMULATION: new position building, buy_avg ≈ mean_buy
+- INSTITUTIONAL_DEFENSE: TIER1 buying to defend underwater position
+- PROFIT_TAKING: sellers have low buy_avg vs high sell_avg (taking gains)
+- DISTRIBUTION: systematic institutional exit
+- ROTATION: some TIER1 buying while others sell (sector rotation)
+- CONTRARIAN: buying into market weakness, buy_avg below recent price
+- MOMENTUM: fresh entry or accelerating into existing trend
+- RETAIL_TRAP: retail accumulating while institutions distribute
+
+---
 
 ${stocksBlock}
 
-Output one line per stock in EXACTLY this format (no extra text, no headers):
-STOCK:BBCA|SCORE:85|SIGNAL:STRONG_BUY|REASON:3 foreign smart accumulators with fresh entry acceleration, 84% foreign dominance
-STOCK:TLKM|SCORE:62|SIGNAL:BUY|REASON:1 foreign SA but decelerating trend, mixed domestic flow
+---
+
+Output EXACTLY one line per stock — no headers, no extra text. Format:
+STOCK:{code}|SCORE:{0-100}|SIGNAL:{BUY|SELL|NEUTRAL}|DOMINANT:{category}|THESIS:{category}|CATALYST:{1 concrete catalyst, no pipe chars}|REASON:{broker flow analysis}
+
+CATALYST must be a specific, concrete trigger for the move — e.g. "Q3 earnings beat + MSCI rebalancing inflow", "Insider defense of 1,200 support by SQ+CC ahead of rights issue", "Commodity supercycle play — ZP+AK positioning for nickel demand surge". Avoid generic phrases like "positive outlook".
+
+Example:
+STOCK:MAIN|SCORE:78|SIGNAL:BUY|DOMINANT:FOREIGN_TIER1|THESIS:FRESH_ACCUMULATION|CATALYST:MSCI EM rebalancing + UBS positioning ahead of Q2 earnings|REASON:AK/ZP/BK all buying (+17.7B combined) at 996-1012 near mean_buy 996, Mirae/YP retail selling into them, ACCELERATING_BUY multi-TF confirms momentum
 `
 }
 
-async function analyzeWithClaude(metrics: StockDeepDive[]): Promise<Map<string, ClaudeSignal>> {
+async function analyzeWithClaude(
+    metrics: StockDeepDive[],
+    combinedMap: Map<string, CombinedData>,
+): Promise<Map<string, ClaudeSignal>> {
     const signals = new Map<string, ClaudeSignal>()
     const fallback = (code: string) => signals.set(code, { score: 50, signal: 'NEUTRAL', reason: 'Claude analysis unavailable' })
 
     try {
-        const prompt = buildDeepDivePrompt(metrics)
+        const prompt = buildDeepDivePrompt(metrics, combinedMap)
         console.log(`[deepdive] calling Claude for ${metrics.length} stocks`)
 
         const proc = Bun.spawn(['claude', '-p', prompt, '--model', MODEL_NAME], {
@@ -395,20 +614,31 @@ async function analyzeWithClaude(metrics: StockDeepDive[]): Promise<Map<string, 
         console.log(`[deepdive] Claude output: ${content.length} chars`)
 
         for (const line of content.split('\n')) {
-            const m = line.match(/STOCK:(\w+)\|SCORE:(\d+)\|SIGNAL:(\w+)\|REASON:(.+)/)
-            if (!m) continue
-            signals.set(m[1], {
-                score: Math.min(100, Math.max(0, parseInt(m[2], 10))),
-                signal: m[3],
-                reason: m[4].trim(),
-            })
+            const m = line.match(/STOCK:(\w+)\|SCORE:(\d+)\|SIGNAL:(\w+)\|DOMINANT:(\w+)\|THESIS:(\w+)\|CATALYST:([^|]+)\|REASON:(.+)/)
+            if (m) {
+                signals.set(m[1], {
+                    score: Math.min(100, Math.max(0, parseInt(m[2], 10))),
+                    signal: m[3],
+                    reason: `[${m[4]} · ${m[5]}] ${m[7].trim()}`,
+                    catalyst: m[6].trim(),
+                })
+                continue
+            }
+            // fallback: old format without CATALYST
+            const old = line.match(/STOCK:(\w+)\|SCORE:(\d+)\|SIGNAL:(\w+)\|DOMINANT:(\w+)\|THESIS:(\w+)\|REASON:(.+)/)
+            if (old) {
+                signals.set(old[1], {
+                    score: Math.min(100, Math.max(0, parseInt(old[2], 10))),
+                    signal: old[3],
+                    reason: `[${old[4]} · ${old[5]}] ${old[6].trim()}`,
+                })
+            }
         }
 
-        // Fill any stocks Claude missed with neutral fallback
         for (const m of metrics) {
             if (!signals.has(m.stockCode)) fallback(m.stockCode)
         }
-    } catch (e: any) {
+    } catch (e: unknown) {
         console.error('[deepdive] Claude spawn error:', e)
         metrics.forEach(m => fallback(m.stockCode))
     }
@@ -419,33 +649,36 @@ async function analyzeWithClaude(metrics: StockDeepDive[]): Promise<Map<string, 
 // ── Scorer ────────────────────────────────────────────────────────────────────
 
 function scoreDeepDive(metrics: StockDeepDive, claudeScore: number): DeepDiveScore {
-    // Dimension 1: Foreign Conviction (35%)
-    const { foreignBrokers, foreignNetValue, domesticNetValue } = metrics
-    const buyerCount = foreignBrokers.smartAccumulators.length + foreignBrokers.trappedBuyers.length
-    const sellerCount = foreignBrokers.netSellers.length + foreignBrokers.profitTakers.length
+    // Dimension 1: Smart Money Conviction (35%) — tracked broker buy side strength
+    const trackedBuyers = metrics.trackedPositions.filter(p => p.side === 'BUY')
+    const trackedSellers = metrics.trackedPositions.filter(p => p.side === 'SELL')
+    const trackedBuyNet = trackedBuyers.reduce((s, p) => s + p.netVal, 0)
+    const trackedSellNet = trackedSellers.reduce((s, p) => s + p.netVal, 0)
 
-    let foreignConviction: number
-    if (buyerCount > sellerCount && foreignNetValue > 0) foreignConviction = 80
-    else if (buyerCount > 0 && foreignNetValue > 0) foreignConviction = 60
-    else if (buyerCount === 0) foreignConviction = 20
-    else foreignConviction = 40
+    let foreignConviction = 40
+    if (trackedBuyers.length >= 3) foreignConviction = 85
+    else if (trackedBuyers.length === 2) foreignConviction = 70
+    else if (trackedBuyers.length === 1) foreignConviction = 50
+    else foreignConviction = 20  // all selling
 
-    foreignConviction += Math.min(foreignBrokers.smartAccumulators.length * 10, 20)
-    if (foreignNetValue > 0 && foreignNetValue > domesticNetValue) foreignConviction += 10
-    foreignConviction = Math.min(foreignConviction, 100)
+    // Boost if buy net >> sell net
+    if (trackedBuyNet > trackedSellNet * 2) foreignConviction = Math.min(foreignConviction + 15, 100)
 
-    // Dimension 2: Classification Health (25%)
-    const { SMART_ACCUMULATOR: smart, TRAPPED_BUYER: trapped, PROFIT_TAKER: profit, NET_SELLER: seller } = metrics.classificationCounts
-    const totalClassified = smart + trapped + profit + seller
+    // Boost if buying below market mean (price efficiency)
+    const buyingBelowMean = trackedBuyers.filter(p => metrics.meanBuyAvg > 0 && p.buyAvg < metrics.meanBuyAvg)
+    foreignConviction = Math.min(foreignConviction + buyingBelowMean.length * 5, 100)
 
-    let classificationHealth: number
-    if (totalClassified === 0) {
-        classificationHealth = 50
-    } else {
-        const pos = smart * 2 + trapped * 0.5
-        const neg = seller * 2 + profit * 1
-        classificationHealth = Math.round((pos / (pos + neg)) * 100)
-    }
+    // Dimension 2: Accumulation Quality (25%) — net imbalance + price efficiency
+    const netImbalance = metrics.totalAccumNetValue - metrics.totalDistNetValue
+    const totalFlow = metrics.totalAccumNetValue + metrics.totalDistNetValue
+    const imbalanceRatio = totalFlow > 0 ? netImbalance / totalFlow : 0
+
+    let classificationHealth = 50
+    if (imbalanceRatio > 0.3) classificationHealth = 90
+    else if (imbalanceRatio > 0.1) classificationHealth = 75
+    else if (imbalanceRatio > 0) classificationHealth = 60
+    else if (imbalanceRatio > -0.1) classificationHealth = 40
+    else classificationHealth = 20
 
     // Dimension 3: Multi-Timeframe Alignment (25%)
     const trend = metrics.multiTimeframe.trend
@@ -456,12 +689,11 @@ function scoreDeepDive(metrics: StockDeepDive, claudeScore: number): DeepDiveSco
     else if (trend === 'MIXED') multiTimeframe = 30
     else multiTimeframe = 10
 
-    const topForeignBuyer = metrics.topBrokers.find(b => b.type === 'Foreign' && b.netValFull > 0)
-    if (topForeignBuyer?.acceleration === 'FRESH_ENTRY') multiTimeframe += 15
-    else if (topForeignBuyer?.acceleration === 'ACCELERATING') multiTimeframe += 10
-    multiTimeframe = Math.min(multiTimeframe, 100)
+    const topBuyer = metrics.topBuyers[0]
+    if (topBuyer?.acceleration === 'FRESH_ENTRY') multiTimeframe = Math.min(multiTimeframe + 15, 100)
+    else if (topBuyer?.acceleration === 'ACCELERATING') multiTimeframe = Math.min(multiTimeframe + 10, 100)
 
-    // Dimension 4: Claude Signal (15%) — replaces static API signal lookup
+    // Dimension 4: Claude Signal (15%)
     const claudeSignalScore = Math.min(100, Math.max(0, claudeScore))
 
     const composite = Math.round(
@@ -487,7 +719,7 @@ function generateMarkdownBrief(
     signals: Map<string, ClaudeSignal>,
     period: { start: string; end: string },
 ): string {
-    const top5 = result.allRanked.slice(0, 5)
+    const top5 = result.allRanked.slice(0, 10)
     const date = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' })
 
     const lines: string[] = [
@@ -506,20 +738,27 @@ function generateMarkdownBrief(
         const dd = pick.deepDive
         const tf = dd.multiTimeframe
 
+        const trackedBuyers = dd.trackedPositions.filter(p => p.side === 'BUY')
+        const trackedSellers = dd.trackedPositions.filter(p => p.side === 'SELL')
+
         lines.push(`### ${pick.rank}. ${pick.stockCode} — Combined Score: ${pick.combinedScore}/100`)
         lines.push(`**Signal:** ${sig?.signal?.replace('_', ' ') ?? 'N/A'} | **DeepDive:** ${pick.deepDiveScore}/100 | **SmartScan:** ${pick.smartScanScore}/100`)
         lines.push('')
         lines.push('| Dimension | Score | Weight |')
         lines.push('|-----------|-------|--------|')
-        lines.push(`| Foreign Conviction | ${sb.foreignConviction}/100 | 35% |`)
-        lines.push(`| Classification Health | ${sb.classificationHealth}/100 | 25% |`)
+        lines.push(`| Smart Money Conviction | ${sb.foreignConviction}/100 | 35% |`)
+        lines.push(`| Accumulation Quality | ${sb.classificationHealth}/100 | 25% |`)
         lines.push(`| Multi-Timeframe | ${sb.multiTimeframe}/100 | 25% |`)
         lines.push(`| Claude Signal | ${sb.claudeSignal}/100 | 15% |`)
         lines.push('')
-        lines.push(`**Flow:** Foreign ${fmtB(dd.foreignNetValue)} | Domestic ${fmtB(dd.domesticNetValue)} | Trend: ${tf.trend.replace(/_/g, ' ')}`)
-        if (dd.foreignBrokers.smartAccumulators.length > 0) {
-            lines.push(`**Foreign SA:** ${dd.foreignBrokers.smartAccumulators.join(', ')}`)
+
+        if (trackedBuyers.length > 0) {
+            lines.push(`**Tracked Buyers:** ${trackedBuyers.map(p => `${p.code}(buy:${p.buyAvg})`).join(', ')}`)
         }
+        if (trackedSellers.length > 0) {
+            lines.push(`**Tracked Sellers:** ${trackedSellers.map(p => `${p.code}(sell:${p.sellAvg})`).join(', ')}`)
+        }
+        lines.push(`**Market Flow:** Accum ${fmtB(dd.totalAccumNetValue)} | Dist ${fmtB(dd.totalDistNetValue)} | Mean Buy ${Math.round(dd.meanBuyAvg)} | Trend: ${tf.trend.replace(/_/g, ' ')}`)
         if (sig?.reason) {
             lines.push(`**AI Assessment:** ${sig.reason}`)
         }
@@ -532,7 +771,7 @@ function generateMarkdownBrief(
     return lines.join('\n')
 }
 
-// ── Route ─────────────────────────────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────────────────────
 
 router.get('/last', async (c) => {
     const last = await persistGet<DeepDiveResult>('deepdive_last_v2')
@@ -550,33 +789,32 @@ router.post('/analyze', async (c) => {
         }
 
         const { startDate, endDate } = getDateRange()
-        const top = watchlist.slice(0, MAX_STOCKS)
+        const top = watchlist
         const tickers = top.map(w => w.ticker).filter(Boolean)
 
-        const cacheKey = `deepdive:v2:${endDate}:${[...tickers].sort().join(',')}`
+        const cacheKey = `deepdive:v7:${endDate}:${[...tickers].sort().join(',')}`
         const cached = cacheGet<DeepDiveResult>(cacheKey)
         if (cached) {
             console.log('[deepdive] cache hit')
             return c.json(cached)
         }
 
-        console.log(`[deepdive] fetching ${tickers.length} profiles (${startDate} → ${endDate})`)
-        const profiles = await fetchAllProfiles(tickers, startDate, endDate)
+        console.log(`[deepdive] fetching ${tickers.length} combined profiles (${startDate} → ${endDate})`)
+        const combinedMap = await fetchAllCombined(tickers, startDate, endDate)
 
-        if (profiles.size < 2) {
-            return c.json({ error: `Too few profiles fetched (${profiles.size}/${tickers.length}) — check API availability` }, 502)
+        const hasData = [...combinedMap.values()].filter(d => d.profile || d.summary)
+        if (hasData.length < 2) {
+            return c.json({ error: `Too few profiles fetched (${hasData.length}/${tickers.length}) — check API availability` }, 502)
         }
 
         const metricsMap = new Map<string, StockDeepDive>()
         for (const ticker of tickers) {
-            const profile = profiles.get(ticker)
-            if (profile) metricsMap.set(ticker, extractMetrics(profile))
+            const combined = combinedMap.get(ticker)
+            if (combined) metricsMap.set(ticker, extractMetrics(combined))
         }
 
         const metricsArray = Array.from(metricsMap.values())
-
-        // Claude analyzes all stocks' broker data to produce per-stock signal scores
-        const claudeSignals = await analyzeWithClaude(metricsArray)
+        const claudeSignals = await analyzeWithClaude(metricsArray, combinedMap)
 
         const scored: Array<{
             ticker: string
@@ -607,6 +845,7 @@ router.post('/analyze', async (c) => {
             deepDive: s.metrics,
             scoreBreakdown: s.score,
             claudeNarrative: claudeSignals.get(s.ticker)?.reason,
+            claudeCatalyst: claudeSignals.get(s.ticker)?.catalyst,
         }))
 
         const result: DeepDiveResult = {
